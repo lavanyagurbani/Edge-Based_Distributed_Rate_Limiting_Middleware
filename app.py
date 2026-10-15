@@ -1,3 +1,5 @@
+from threading import Thread
+from workers.sync_worker import SyncWorker
 import json
 import os
 import time
@@ -148,7 +150,18 @@ def simulate_failure():
     app.config['SIMULATE_FAILURE'] = not app.config.get('SIMULATE_FAILURE', False)
     return jsonify({"simulate_failure": app.config['SIMULATE_FAILURE']})
 
+
 if __name__ == '__main__':
     host = os.getenv('APP_HOST', '0.0.0.0')
     port = int(os.getenv('PORT', os.getenv('APP_PORT', 5000)))
-    app.run(host=host, port=port, debug=os.getenv('FLASK_DEBUG', '0') == '1')
+
+    worker = SyncWorker()
+    worker_thread = Thread(target=worker.run, daemon=True)
+    worker_thread.start()
+
+    app.run(
+        host=host,
+        port=port,
+        debug=os.getenv('FLASK_DEBUG', '0') == '1',
+        use_reloader=False
+    )
