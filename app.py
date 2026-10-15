@@ -4,6 +4,11 @@ import json
 import os
 import time
 import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    force=True
+)
 from flask import Flask, jsonify, request, send_from_directory
 from services.redis_service import RedisService
 from rate_limiter.factory import get_limiter
