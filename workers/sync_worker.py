@@ -128,43 +128,49 @@ class SyncWorker:
 
             channel.basic_ack(delivery_tag=method.delivery_tag)
 
+
     def run(self):
-        connection_channel = self._connect()
+        connection = None
+        channel = None
+        last_connect_attempt = 0.0
 
-        if connection_channel:
-            connection, channel = connection_channel
-
-            channel.basic_qos(
-                prefetch_count=Config.SYNC_BATCH_SIZE,
-            )
-
-            channel.basic_consume(
-                queue="rate_limit_events",
-                on_message_callback=self._handle_message,
-                auto_ack=False,
-            )
-
-            _logger.info("SyncWorker started with RabbitMQ")
-
-        else:
-            connection = None
-            channel = None
-            _logger.info("SyncWorker started without RabbitMQ")
-
+        _logger.info("SyncWorker starting")
 
         try:
             while not self._stop_event.is_set():
                 now = time.time()
 
-                # Update heartbeat even when no events are available.
+                # Reconnect to RabbitMQ if disconnected.
+                if channel is None and now - last_connect_attempt >= 5:
+                    last_connect_attempt = now
+                    result = self._connect()
+
+                    if result:
+                        connection, channel = result
+                        channel.basic_qos(
+                            prefetch_count=Config.SYNC_BATCH_SIZE
+                        )
+                        channel.basic_consume(
+                            queue="rate_limit_events",
+                            on_message_callback=self._handle_message,
+                            auto_ack=False,
+                        )
+                        _logger.info(
+                            "SyncWorker connected to RabbitMQ"
+                        )
+
+                # Update worker heartbeat.
                 try:
                     self.redis.client.set(
                         "worker:heartbeat",
                         int(now),
                     )
                 except Exception:
-                    _logger.exception("Failed to update worker heartbeat")
+                    _logger.exception(
+                        "Failed to update worker heartbeat"
+                    )
 
+                # Flush events when batch size or time limit is reached.
                 if (
                     len(self.batch) >= Config.SYNC_BATCH_SIZE
                     or now - self.last_flush
@@ -172,15 +178,25 @@ class SyncWorker:
                 ):
                     self._process_batch()
 
-                if channel:
-                    connection.process_data_events(time_limit=1.0)
-
-                elif self.fallback_queue is not None:
+                if channel is not None and connection is not None:
                     try:
-                        event = self.fallback_queue.get(timeout=1.0)
-                        self.batch.append(event)
+                        connection.process_data_events(
+                            time_limit=1.0
+                        )
                     except Exception:
-                        pass
+                        _logger.exception(
+                            "RabbitMQ connection lost; retrying"
+                        )
+
+                        try:
+                            if connection.is_open:
+                                connection.close()
+                        except Exception:
+                            pass
+
+                        connection = None
+                        channel = None
+                        last_connect_attempt = time.time()
 
                 else:
                     time.sleep(1.0)
@@ -189,12 +205,13 @@ class SyncWorker:
             _logger.info("Worker stopping")
 
         finally:
-            if (
-                connection_channel
-                and connection
-                and connection.is_open
-            ):
-                connection.close()
+            if connection is not None:
+                try:
+                    if connection.is_open:
+                        connection.close()
+                except Exception:
+                    pass
+
 
     def stop(self):
         self._stop_event.set()
